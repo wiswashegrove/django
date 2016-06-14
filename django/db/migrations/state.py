@@ -29,9 +29,30 @@ def _get_app_label_and_model_name(model, app_label=''):
         return model._meta.app_label, model._meta.model_name
 
 
+def _get_related_models(m):
+    """
+    Return all models that have a direct relationship to the given model.
+    """
+    related_models = [
+        subclass for subclass in m.__subclasses__()
+        if issubclass(subclass, models.Model)
+    ]
+    related_fields_models = set()
+    for f in m._meta.get_fields(include_parents=True, include_hidden=True):
+        if f.is_relation and f.related_model is not None and not isinstance(f.related_model, six.string_types):
+            related_fields_models.add(f.model)
+            related_models.append(f.related_model)
+    # Reverse accessors of foreign keys to proxy models are attached to their
+    # concrete proxied model.
+    opts = m._meta
+    if opts.proxy and m in related_fields_models:
+        related_models.append(opts.concrete_model)
+    return related_models
+
+
 def get_related_models_recursive(model):
     """
-    Returns all models that have a direct or indirect relationship
+    Return all models that have a direct or indirect relationship
     to the given model.
 
     Relationships are either defined by explicit relational fields, like
@@ -40,23 +61,14 @@ def get_related_models_recursive(model):
     however, that a model inheriting from a concrete model is also related to
     its superclass through the implicit *_ptr OneToOneField on the subclass.
     """
-    def _related_models(m):
-        return [
-            f.related_model for f in m._meta.get_fields(include_parents=True, include_hidden=True)
-            if f.is_relation and not isinstance(f.related_model, six.string_types)
-        ] + [
-            subclass for subclass in m.__subclasses__()
-            if issubclass(subclass, models.Model)
-        ]
-
     seen = set()
-    queue = _related_models(model)
+    queue = _get_related_models(model)
     for rel_mod in queue:
         rel_app_label, rel_model_name = rel_mod._meta.app_label, rel_mod._meta.model_name
         if (rel_app_label, rel_model_name) in seen:
             continue
         seen.add((rel_app_label, rel_model_name))
-        queue.extend(_related_models(rel_mod))
+        queue.extend(_get_related_models(rel_mod))
     return seen - {(model._meta.app_label, model._meta.model_name)}
 
 
@@ -228,13 +240,11 @@ class StateApps(Apps):
         self.render_multiple(list(models.values()) + self.real_models)
 
         # There shouldn't be any operations pending at this point.
-        pending_models = set(self._pending_operations)
-        if ignore_swappable:
-            pending_models -= {make_model_tuple(settings.AUTH_USER_MODEL)}
-        if pending_models:
-            msg = "Unhandled pending operations for models: %s"
-            labels = (".".join(model_key) for model_key in self._pending_operations)
-            raise ValueError(msg % ", ".join(labels))
+        from django.core.checks.model_checks import _check_lazy_references
+        ignore = {make_model_tuple(settings.AUTH_USER_MODEL)} if ignore_swappable else set()
+        errors = _check_lazy_references(self, ignore=ignore)
+        if errors:
+            raise ValueError("\n".join(error.msg for error in errors))
 
     @contextmanager
     def bulk_update(self):
@@ -357,10 +367,9 @@ class ModelState(object):
                 continue
             if isinstance(field, OrderWrt):
                 continue
-            name, path, args, kwargs = field.deconstruct()
-            field_class = import_string(path)
+            name = force_text(field.name, strings_only=True)
             try:
-                fields.append((name, field_class(*args, **kwargs)))
+                fields.append((name, field.clone()))
             except TypeError as e:
                 raise TypeError("Couldn't reconstruct field %s on %s: %s" % (
                     name,
@@ -369,10 +378,9 @@ class ModelState(object):
                 ))
         if not exclude_rels:
             for field in model._meta.local_many_to_many:
-                name, path, args, kwargs = field.deconstruct()
-                field_class = import_string(path)
+                name = force_text(field.name, strings_only=True)
                 try:
-                    fields.append((name, field_class(*args, **kwargs)))
+                    fields.append((name, field.clone()))
                 except TypeError as e:
                     raise TypeError("Couldn't reconstruct m2m field %s on %s: %s" % (
                         name,
@@ -402,6 +410,9 @@ class ModelState(object):
             for key in ["unique_together", "index_together", "order_with_respect_to"]:
                 if key in options:
                     del options[key]
+        # Private fields are ignored, so remove options that refer to them.
+        elif options.get('order_with_respect_to') in {field.name for field in model._meta.private_fields}:
+            del options['order_with_respect_to']
 
         def flatten_bases(model):
             bases = []
@@ -432,45 +443,29 @@ class ModelState(object):
         if not any((isinstance(base, six.string_types) or issubclass(base, models.Model)) for base in bases):
             bases = (models.Model,)
 
-        # Constructs all managers on the model
-        managers_mapping = {}
+        managers = []
 
-        def reconstruct_manager(mgr):
-            as_manager, manager_path, qs_path, args, kwargs = mgr.deconstruct()
-            if as_manager:
-                qs_class = import_string(qs_path)
-                instance = qs_class.as_manager()
-            else:
-                manager_class = import_string(manager_path)
-                instance = manager_class(*args, **kwargs)
-            # We rely on the ordering of the creation_counter of the original
-            # instance
-            name = force_text(mgr.name)
-            managers_mapping[name] = (mgr.creation_counter, instance)
-
-        if hasattr(model, "_default_manager"):
-            default_manager_name = force_text(model._default_manager.name)
-            # Make sure the default manager is always the first
+        # Make sure the default manager is always first since ordering chooses
+        # the default manager.
+        if not model._default_manager.auto_created:
             if model._default_manager.use_in_migrations:
-                reconstruct_manager(model._default_manager)
+                default_manager = copy.copy(model._default_manager)
+                default_manager._set_creation_counter()
+
+            # If the default manager doesn't have `use_in_migrations = True`,
+            # shim a default manager so another manager isn't promoted in its
+            # place.
             else:
-                # Force this manager to be the first and thus default
-                managers_mapping[default_manager_name] = (0, models.Manager())
-            # Sort all managers by their creation counter
-            for _, manager, _ in sorted(model._meta.managers):
-                if manager.name == "_base_manager" or not manager.use_in_migrations:
-                    continue
-                reconstruct_manager(manager)
-            # Sort all managers by their creation counter but take only name and
-            # instance for further processing
-            managers = [
-                (name, instance) for name, (cc, instance) in
-                sorted(managers_mapping.items(), key=lambda v: v[1])
-            ]
-            if managers == [(default_manager_name, models.Manager())]:
-                managers = []
-        else:
-            managers = []
+                default_manager = models.Manager()
+                default_manager.model = model
+                default_manager.name = model._default_manager.name
+            managers.append((force_text(default_manager.name), default_manager))
+
+        for manager in model._meta.managers:
+            if manager.use_in_migrations and manager is not model._default_manager:
+                manager = copy.copy(manager)
+                manager._set_creation_counter()
+                managers.append((force_text(manager.name), manager))
 
         # Construct the new ModelState
         return cls(
@@ -498,13 +493,6 @@ class ModelState(object):
                 for k, v in value.items()
             }
         return value
-
-    def construct_fields(self):
-        "Deep-clone the fields using deconstruction"
-        for name, field in self.fields:
-            _, path, args, kwargs = field.deconstruct()
-            field_class = import_string(path)
-            yield name, field_class(*args, **kwargs)
 
     def construct_managers(self):
         "Deep-clone the managers using deconstruction"
@@ -546,7 +534,7 @@ class ModelState(object):
         except LookupError:
             raise InvalidBasesError("Cannot resolve one or more bases from %r" % (self.bases,))
         # Turn fields into a dict for the body, add other bits
-        body = dict(self.construct_fields())
+        body = {name: field.clone() for name, field in self.fields}
         body['Meta'] = meta
         body['__module__'] = "__fake__"
 

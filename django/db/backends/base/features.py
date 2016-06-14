@@ -24,6 +24,7 @@ class BaseDatabaseFeatures(object):
 
     can_use_chunked_reads = True
     can_return_id_from_insert = False
+    can_return_ids_from_bulk_insert = False
     has_bulk_insert = False
     uses_savepoints = False
     can_release_savepoints = False
@@ -63,6 +64,10 @@ class BaseDatabaseFeatures(object):
 
     # Is there a true datatype for timedeltas?
     has_native_duration_field = False
+
+    # Does the database driver supports same type temporal data subtraction
+    # by returning the type used to store duration field?
+    supports_temporal_subtraction = False
 
     # Does the database driver support timedeltas as arguments?
     # This is only relevant when there is a native duration field.
@@ -157,9 +162,6 @@ class BaseDatabaseFeatures(object):
     # Support for the DISTINCT ON clause
     can_distinct_on_fields = False
 
-    # Can the backend use an Avg aggregate on DurationField?
-    can_avg_on_durationfield = True
-
     # Does the backend decide to commit before SAVEPOINT statements
     # when autocommit is disabled? http://bugs.python.org/issue8145#msg109965
     autocommits_when_autocommit_is_off = False
@@ -210,6 +212,14 @@ class BaseDatabaseFeatures(object):
 
     # Does the backend support "select for update" queries with limit (and offset)?
     supports_select_for_update_with_limit = True
+
+    # Does the backend ignore null expressions in GREATEST and LEAST queries unless
+    # every expression is null?
+    greatest_least_ignores_nulls = False
+
+    # Can the backend clone databases for parallel test execution?
+    # Defaults to False to allow third-party backends to opt-in.
+    can_clone_databases = False
 
     def __init__(self, connection):
         self.connection = connection

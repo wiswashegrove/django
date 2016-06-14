@@ -1,14 +1,14 @@
 from __future__ import unicode_literals
 
 import os
+from unittest import skipUnless
 
 from django.template import Context, Engine, TemplateSyntaxError
 from django.template.base import Node
 from django.template.library import InvalidTemplateLibrary
-from django.test import SimpleTestCase, ignore_warnings
+from django.test import SimpleTestCase
 from django.test.utils import extend_sys_path
 from django.utils import six
-from django.utils.deprecation import RemovedInDjango20Warning
 
 from .templatetags import custom, inclusion
 from .utils import ROOT
@@ -104,6 +104,28 @@ class SimpleTagTests(TagTestCase):
             with self.assertRaisesMessage(TemplateSyntaxError, entry[0]):
                 self.engine.from_string("%s as var %%}" % entry[1][0:-2])
 
+    def test_simple_tag_escaping_autoescape_off(self):
+        c = Context({'name': "Jack & Jill"}, autoescape=False)
+        t = self.engine.from_string("{% load custom %}{% escape_naive %}")
+        self.assertEqual(t.render(c), "Hello Jack & Jill!")
+
+    def test_simple_tag_naive_escaping(self):
+        c = Context({'name': "Jack & Jill"})
+        t = self.engine.from_string("{% load custom %}{% escape_naive %}")
+        self.assertEqual(t.render(c), "Hello Jack &amp; Jill!")
+
+    def test_simple_tag_explicit_escaping(self):
+        # Check we don't double escape
+        c = Context({'name': "Jack & Jill"})
+        t = self.engine.from_string("{% load custom %}{% escape_explicit %}")
+        self.assertEqual(t.render(c), "Hello Jack &amp; Jill!")
+
+    def test_simple_tag_format_html_escaping(self):
+        # Check we don't double escape
+        c = Context({'name': "Jack & Jill"})
+        t = self.engine.from_string("{% load custom %}{% escape_format_html %}")
+        self.assertEqual(t.render(c), "Hello Jack &amp; Jill!")
+
     def test_simple_tag_registration(self):
         # Test that the decorators preserve the decorated function's docstring, name and attributes.
         self.verify_tag(custom.no_params, 'no_params')
@@ -140,7 +162,10 @@ class InclusionTagTests(TagTestCase):
                 'inclusion_params_and_context - Expected result (context value: 42): 37\n'),
             ('{% load inclusion %}{% inclusion_two_params 37 42 %}',
                 'inclusion_two_params - Expected result: 37, 42\n'),
-            ('{% load inclusion %}{% inclusion_one_default 37 %}', 'inclusion_one_default - Expected result: 37, hi\n'),
+            (
+                '{% load inclusion %}{% inclusion_one_default 37 %}',
+                'inclusion_one_default - Expected result: 37, hi\n'
+            ),
             ('{% load inclusion %}{% inclusion_one_default 37 two="hello" %}',
                 'inclusion_one_default - Expected result: 37, hello\n'),
             ('{% load inclusion %}{% inclusion_one_default one=99 two="hello" %}',
@@ -244,22 +269,7 @@ class InclusionTagTests(TagTestCase):
         self.verify_tag(inclusion.inclusion_only_unlimited_args, 'inclusion_only_unlimited_args')
         self.verify_tag(inclusion.inclusion_tag_without_context_parameter, 'inclusion_tag_without_context_parameter')
         self.verify_tag(inclusion.inclusion_tag_use_l10n, 'inclusion_tag_use_l10n')
-        self.verify_tag(inclusion.inclusion_tag_current_app, 'inclusion_tag_current_app')
         self.verify_tag(inclusion.inclusion_unlimited_args_kwargs, 'inclusion_unlimited_args_kwargs')
-
-    @ignore_warnings(category=RemovedInDjango20Warning)
-    def test_15070_current_app(self):
-        """
-        Test that inclusion tag passes down `current_app` of context to the
-        Context of the included/rendered template as well.
-        """
-        c = Context({})
-        t = self.engine.from_string('{% load inclusion %}{% inclusion_tag_current_app %}')
-        self.assertEqual(t.render(c).strip(), 'None')
-
-        # That part produces the deprecation warning
-        c = Context({}, current_app='advanced')
-        self.assertEqual(t.render(c).strip(), 'advanced')
 
     def test_15070_use_l10n(self):
         """
@@ -355,3 +365,9 @@ class TemplateTagLoadingTests(SimpleTestCase):
                 'working_egg': 'tagsegg.templatetags.working_egg',
             })
             engine.from_string(ttext)
+
+    @skipUnless(six.PY3, "Python 3 only -- Python 2 doesn't have annotations.")
+    def test_load_annotated_function(self):
+        Engine(libraries={
+            'annotated_tag_function': 'template_tests.annotated_tag_function',
+        })

@@ -6,8 +6,7 @@ import os
 import struct
 import tempfile
 import unittest
-import zlib
-from io import BytesIO, StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 
 from django.core.files import File
 from django.core.files.base import ContentFile
@@ -121,6 +120,40 @@ class FileTests(unittest.TestCase):
         f = File(StringIO('one\ntwo\nthree'))
         self.assertEqual(list(f), ['one\n', 'two\n', 'three'])
 
+    def test_readable(self):
+        with tempfile.TemporaryFile() as temp, File(temp, name='something.txt') as test_file:
+            self.assertTrue(test_file.readable())
+        self.assertFalse(test_file.readable())
+
+    def test_writable(self):
+        with tempfile.TemporaryFile() as temp, File(temp, name='something.txt') as test_file:
+            self.assertTrue(test_file.writable())
+        self.assertFalse(test_file.writable())
+        with tempfile.TemporaryFile('rb') as temp, File(temp, name='something.txt') as test_file:
+            self.assertFalse(test_file.writable())
+
+    def test_seekable(self):
+        with tempfile.TemporaryFile() as temp, File(temp, name='something.txt') as test_file:
+            self.assertTrue(test_file.seekable())
+        self.assertFalse(test_file.seekable())
+
+    def test_io_wrapper(self):
+        content = "vive l'été\n"
+        with tempfile.TemporaryFile() as temp, File(temp, name='something.txt') as test_file:
+            test_file.write(content.encode('utf-8'))
+            test_file.seek(0)
+            wrapper = TextIOWrapper(test_file, 'utf-8', newline='\n')
+            self.assertEqual(wrapper.read(), content)
+            # The following seek() call is required on Windows Python 2 when
+            # switching from reading to writing.
+            wrapper.seek(0, 2)
+            wrapper.write(content)
+            wrapper.seek(0)
+            self.assertEqual(wrapper.read(), content * 2)
+            test_file = wrapper.detach()
+            test_file.seek(0)
+            self.assertEqual(test_file.read(), (content * 2).encode('utf-8'))
+
 
 class NoNameFileTestCase(unittest.TestCase):
     """
@@ -233,10 +266,7 @@ class InconsistentGetImageDimensionsBug(unittest.TestCase):
         get_image_dimensions fails on some pngs, while Image.size is working good on them
         """
         img_path = os.path.join(os.path.dirname(upath(__file__)), "magic.png")
-        try:
-            size = images.get_image_dimensions(img_path)
-        except zlib.error:
-            self.fail("Exception raised from get_image_dimensions().")
+        size = images.get_image_dimensions(img_path)
         with open(img_path, 'rb') as fh:
             self.assertEqual(size, Image.open(fh).size)
 
@@ -278,7 +308,8 @@ class FileMoveSafeTests(unittest.TestCase):
         handle_b, self.file_b = tempfile.mkstemp()
 
         # file_move_safe should raise an IOError exception if destination file exists and allow_overwrite is False
-        self.assertRaises(IOError, lambda: file_move_safe(self.file_a, self.file_b, allow_overwrite=False))
+        with self.assertRaises(IOError):
+            file_move_safe(self.file_a, self.file_b, allow_overwrite=False)
 
         # should allow it and continue on if allow_overwrite is True
         self.assertIsNone(file_move_safe(self.file_a, self.file_b, allow_overwrite=True))

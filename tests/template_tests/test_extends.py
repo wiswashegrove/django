@@ -4,7 +4,7 @@ from django.template import Context, Engine, TemplateDoesNotExist
 from django.template.loader_tags import ExtendsError
 from django.template.loaders.base import Loader
 from django.test import SimpleTestCase, ignore_warnings
-from django.utils.deprecation import RemovedInDjango21Warning
+from django.utils.deprecation import RemovedInDjango20Warning
 
 from .utils import ROOT
 
@@ -42,16 +42,19 @@ class ExtendsBehaviorTests(SimpleTestCase):
     def test_recursive_multiple_loaders(self):
         engine = Engine(
             dirs=[os.path.join(RECURSIVE, 'fs')],
-            loaders=[
-                ('django.template.loaders.locmem.Loader', {
-                    'one.html': '{% extends "one.html" %}{% block content %}{{ block.super }} locmem-one{% endblock %}',
-                    'two.html': '{% extends "two.html" %}{% block content %}{{ block.super }} locmem-two{% endblock %}',
+            loaders=[(
+                'django.template.loaders.locmem.Loader', {
+                    'one.html': (
+                        '{% extends "one.html" %}{% block content %}{{ block.super }} locmem-one{% endblock %}'
+                    ),
+                    'two.html': (
+                        '{% extends "two.html" %}{% block content %}{{ block.super }} locmem-two{% endblock %}'
+                    ),
                     'three.html': (
                         '{% extends "three.html" %}{% block content %}{{ block.super }} locmem-three{% endblock %}'
                     ),
-                }),
-                'django.template.loaders.filesystem.Loader',
-            ],
+                }
+            ), 'django.template.loaders.filesystem.Loader'],
         )
         template = engine.get_template('one.html')
         output = template.render(Context({}))
@@ -132,7 +135,7 @@ class NonRecursiveLoader(Loader):
             raise TemplateDoesNotExist(template_name)
 
 
-@ignore_warnings(category=RemovedInDjango21Warning)
+@ignore_warnings(category=RemovedInDjango20Warning)
 class NonRecursiveLoaderExtendsTests(SimpleTestCase):
 
     loaders = [

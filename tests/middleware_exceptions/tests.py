@@ -7,7 +7,8 @@ from django.http import HttpResponse
 from django.template import engines
 from django.template.response import TemplateResponse
 from django.test import RequestFactory, SimpleTestCase, override_settings
-from django.test.utils import patch_logger
+from django.test.utils import ignore_warnings, patch_logger
+from django.utils.deprecation import MiddlewareMixin, RemovedInDjango20Warning
 
 
 class TestException(Exception):
@@ -15,13 +16,14 @@ class TestException(Exception):
 
 
 # A middleware base class that tracks which methods have been called
-class TestMiddleware(object):
-    def __init__(self):
+class TestMiddleware(MiddlewareMixin):
+    def __init__(self, get_response=None):
         self.process_request_called = False
         self.process_view_called = False
         self.process_response_called = False
         self.process_template_response_called = False
         self.process_exception_called = False
+        self.get_response = get_response
 
     def process_request(self, request):
         self.process_request_called = True
@@ -115,7 +117,12 @@ class NoResponseMiddleware(TestMiddleware):
         super(NoResponseMiddleware, self).process_response(request, response)
 
 
-@override_settings(ROOT_URLCONF='middleware_exceptions.urls')
+@ignore_warnings(category=RemovedInDjango20Warning)
+@override_settings(
+    ROOT_URLCONF='middleware_exceptions.urls',
+    MIDDLEWARE_CLASSES=['django.middleware.common.CommonMiddleware'],
+    MIDDLEWARE=None,
+)
 class BaseMiddlewareExceptionTest(SimpleTestCase):
 
     def setUp(self):
@@ -395,10 +402,13 @@ class MiddlewareTests(BaseMiddlewareExceptionTest):
         self._add_middleware(post_middleware)
         self._add_middleware(middleware)
         self._add_middleware(pre_middleware)
-        self.assert_exceptions_handled('/middleware_exceptions/null_view/', [
-            "The view middleware_exceptions.views.null_view didn't return an HttpResponse object. It returned None instead.",
-        ],
-            ValueError())
+        self.assert_exceptions_handled(
+            '/middleware_exceptions/null_view/', [
+                "The view middleware_exceptions.views.null_view didn't return "
+                "an HttpResponse object. It returned None instead."
+            ],
+            ValueError()
+        )
 
         # Check that the right middleware methods have been invoked
         self.assert_middleware_usage(pre_middleware, True, True, False, True, False)
@@ -412,10 +422,13 @@ class MiddlewareTests(BaseMiddlewareExceptionTest):
         self._add_middleware(post_middleware)
         self._add_middleware(middleware)
         self._add_middleware(pre_middleware)
-        self.assert_exceptions_handled('/middleware_exceptions/null_view/', [
-            "The view middleware_exceptions.views.null_view didn't return an HttpResponse object. It returned None instead."
-        ],
-            ValueError())
+        self.assert_exceptions_handled(
+            '/middleware_exceptions/null_view/', [
+                "The view middleware_exceptions.views.null_view didn't return "
+                "an HttpResponse object. It returned None instead."
+            ],
+            ValueError()
+        )
 
         # Check that the right middleware methods have been invoked
         self.assert_middleware_usage(pre_middleware, True, True, False, True, False)
@@ -486,6 +499,14 @@ class MiddlewareTests(BaseMiddlewareExceptionTest):
         # Check that the right middleware methods have been invoked
         self.assert_middleware_usage(middleware, True, True, True, True, False)
 
+    @override_settings(MIDDLEWARE=['middleware_exceptions.middleware.ProcessExceptionMiddleware'])
+    def test_exception_in_render_passed_to_process_exception(self):
+        # Repopulate the list of middlewares since it's already been populated
+        # by setUp() before the MIDDLEWARE setting got overridden.
+        self.client.handler.load_middleware()
+        response = self.client.get('/middleware_exceptions/exception_in_render/')
+        self.assertEqual(response.content, b'Exception caught')
+
 
 class BadMiddlewareTests(BaseMiddlewareExceptionTest):
 
@@ -524,7 +545,10 @@ class BadMiddlewareTests(BaseMiddlewareExceptionTest):
         self._add_middleware(post_middleware)
         self._add_middleware(bad_middleware)
         self._add_middleware(pre_middleware)
-        self.assert_exceptions_handled('/middleware_exceptions/template_response/', ['Test Template Response Exception'])
+        self.assert_exceptions_handled(
+            '/middleware_exceptions/template_response/',
+            ['Test Template Response Exception']
+        )
 
         # Check that the right middleware methods have been invoked
         self.assert_middleware_usage(pre_middleware, True, True, False, True, False)
@@ -706,10 +730,13 @@ class BadMiddlewareTests(BaseMiddlewareExceptionTest):
         self._add_middleware(post_middleware)
         self._add_middleware(bad_middleware)
         self._add_middleware(pre_middleware)
-        self.assert_exceptions_handled('/middleware_exceptions/null_view/', [
-            "The view middleware_exceptions.views.null_view didn't return an HttpResponse object. It returned None instead.",
-            'Test Response Exception'
-        ])
+        self.assert_exceptions_handled(
+            '/middleware_exceptions/null_view/', [
+                "The view middleware_exceptions.views.null_view didn't return "
+                "an HttpResponse object. It returned None instead.",
+                'Test Response Exception'
+            ]
+        )
 
         # Check that the right middleware methods have been invoked
         self.assert_middleware_usage(pre_middleware, True, True, False, False, False)
@@ -723,10 +750,13 @@ class BadMiddlewareTests(BaseMiddlewareExceptionTest):
         self._add_middleware(post_middleware)
         self._add_middleware(bad_middleware)
         self._add_middleware(pre_middleware)
-        self.assert_exceptions_handled('/middleware_exceptions/null_view/', [
-            "The view middleware_exceptions.views.null_view didn't return an HttpResponse object. It returned None instead."
-        ],
-            ValueError())
+        self.assert_exceptions_handled(
+            '/middleware_exceptions/null_view/', [
+                "The view middleware_exceptions.views.null_view didn't return "
+                "an HttpResponse object. It returned None instead."
+            ],
+            ValueError()
+        )
 
         # Check that the right middleware methods have been invoked
         self.assert_middleware_usage(pre_middleware, True, True, False, True, False)
@@ -813,10 +843,13 @@ class BadMiddlewareTests(BaseMiddlewareExceptionTest):
         self._add_middleware(post_middleware)
         self._add_middleware(middleware)
         self._add_middleware(pre_middleware)
-        self.assert_exceptions_handled('/middleware_exceptions/template_response/', [
-            "NoTemplateResponseMiddleware.process_template_response didn't return an HttpResponse object. It returned None instead."
-        ],
-            ValueError())
+        self.assert_exceptions_handled(
+            '/middleware_exceptions/template_response/', [
+                "NoTemplateResponseMiddleware.process_template_response didn't "
+                "return an HttpResponse object. It returned None instead."
+            ],
+            ValueError()
+        )
 
         # Check that the right middleware methods have been invoked
         self.assert_middleware_usage(pre_middleware, True, True, False, True, False)
@@ -834,12 +867,13 @@ class RootUrlconfTests(SimpleTestCase):
         # Removing ROOT_URLCONF is safe, as override_settings will restore
         # the previously defined settings.
         del settings.ROOT_URLCONF
-        self.assertRaises(AttributeError, self.client.get, "/middleware_exceptions/view/")
+        with self.assertRaises(AttributeError):
+            self.client.get("/middleware_exceptions/view/")
 
 
 class MyMiddleware(object):
 
-    def __init__(self):
+    def __init__(self, get_response=None):
         raise MiddlewareNotUsed
 
     def process_request(self, request):
@@ -848,7 +882,7 @@ class MyMiddleware(object):
 
 class MyMiddlewareWithExceptionMessage(object):
 
-    def __init__(self):
+    def __init__(self, get_response=None):
         raise MiddlewareNotUsed('spam eggs')
 
     def process_request(self, request):
@@ -858,6 +892,7 @@ class MyMiddlewareWithExceptionMessage(object):
 @override_settings(
     DEBUG=True,
     ROOT_URLCONF='middleware_exceptions.urls',
+    MIDDLEWARE=['django.middleware.common.CommonMiddleware'],
 )
 class MiddlewareNotUsedTests(SimpleTestCase):
 
@@ -868,9 +903,7 @@ class MiddlewareNotUsedTests(SimpleTestCase):
         with self.assertRaises(MiddlewareNotUsed):
             MyMiddleware().process_request(request)
 
-    @override_settings(MIDDLEWARE_CLASSES=[
-        'middleware_exceptions.tests.MyMiddleware',
-    ])
+    @override_settings(MIDDLEWARE=['middleware_exceptions.tests.MyMiddleware'])
     def test_log(self):
         with patch_logger('django.request', 'debug') as calls:
             self.client.get('/middleware_exceptions/view/')
@@ -880,9 +913,7 @@ class MiddlewareNotUsedTests(SimpleTestCase):
             "MiddlewareNotUsed: 'middleware_exceptions.tests.MyMiddleware'"
         )
 
-    @override_settings(MIDDLEWARE_CLASSES=[
-        'middleware_exceptions.tests.MyMiddlewareWithExceptionMessage',
-    ])
+    @override_settings(MIDDLEWARE=['middleware_exceptions.tests.MyMiddlewareWithExceptionMessage'])
     def test_log_custom_message(self):
         with patch_logger('django.request', 'debug') as calls:
             self.client.get('/middleware_exceptions/view/')
@@ -897,3 +928,12 @@ class MiddlewareNotUsedTests(SimpleTestCase):
         with patch_logger('django.request', 'debug') as calls:
             self.client.get('/middleware_exceptions/view/')
         self.assertEqual(len(calls), 0)
+
+
+@ignore_warnings(category=RemovedInDjango20Warning)
+@override_settings(
+    MIDDLEWARE_CLASSES=['django.middleware.common.CommonMiddleware'],
+    MIDDLEWARE=None,
+)
+class MiddlewareNotUsedMiddlewareClassesTests(MiddlewareNotUsedTests):
+    pass

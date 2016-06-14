@@ -4,7 +4,8 @@ import json
 
 from django.contrib.gis.geos import LinearRing, Point, Polygon
 from django.core import serializers
-from django.test import TestCase, skipUnlessDBFeature
+from django.test import TestCase, mock, skipUnlessDBFeature
+from django.utils import six
 
 from .models import City, MultiFields, PennsylvaniaCity
 
@@ -32,6 +33,8 @@ class GeoJSONSerializerTests(TestCase):
         self.assertEqual(len(geodata['features']), len(City.objects.all()))
         self.assertEqual(geodata['features'][0]['geometry']['type'], 'Point')
         self.assertEqual(geodata['features'][0]['properties']['name'], 'Chicago')
+        first_city = City.objects.all().order_by('name').first()
+        self.assertEqual(geodata['features'][0]['properties']['pk'], str(first_city.pk))
 
     def test_geometry_field_option(self):
         """
@@ -46,8 +49,21 @@ class GeoJSONSerializerTests(TestCase):
         geodata = json.loads(geojson)
         self.assertEqual(geodata['features'][0]['geometry']['type'], 'Point')
 
-        geojson = serializers.serialize('geojson', MultiFields.objects.all(),
-            geometry_field='poly')
+        geojson = serializers.serialize(
+            'geojson',
+            MultiFields.objects.all(),
+            geometry_field='poly'
+        )
+        geodata = json.loads(geojson)
+        self.assertEqual(geodata['features'][0]['geometry']['type'], 'Polygon')
+
+        # geometry_field is considered even if not in fields (#26138).
+        geojson = serializers.serialize(
+            'geojson',
+            MultiFields.objects.all(),
+            geometry_field='poly',
+            fields=('city',)
+        )
         geodata = json.loads(geojson)
         self.assertEqual(geodata['features'][0]['geometry']['type'], 'Polygon')
 
@@ -57,18 +73,29 @@ class GeoJSONSerializerTests(TestCase):
         the 'properties' of the generated output.
         """
         PennsylvaniaCity.objects.create(name='Mansfield', county='Tioga', point='POINT(-77.071445 41.823881)')
-        geojson = serializers.serialize('geojson', PennsylvaniaCity.objects.all(),
-            fields=('county', 'point'))
+        geojson = serializers.serialize(
+            'geojson', PennsylvaniaCity.objects.all(), fields=('county', 'point'),
+        )
         geodata = json.loads(geojson)
         self.assertIn('county', geodata['features'][0]['properties'])
         self.assertNotIn('founded', geodata['features'][0]['properties'])
+        self.assertNotIn('pk', geodata['features'][0]['properties'])
 
     def test_srid_option(self):
         geojson = serializers.serialize('geojson', City.objects.all().order_by('name'), srid=2847)
         geodata = json.loads(geojson)
         self.assertEqual(
             [int(c) for c in geodata['features'][0]['geometry']['coordinates']],
-            [1564802, 5613214])
+            [1564802, 5613214]
+        )
+
+    @mock.patch('django.contrib.gis.serializers.geojson.HAS_GDAL', False)
+    def test_without_gdal(self):
+        # Without coordinate transformation, the serialization should succeed:
+        serializers.serialize('geojson', City.objects.all())
+        with six.assertRaisesRegex(self, serializers.base.SerializationError, '.*GDAL is not installed'):
+            # Coordinate transformations need GDAL
+            serializers.serialize('geojson', City.objects.all(), srid=2847)
 
     def test_deserialization_exception(self):
         """

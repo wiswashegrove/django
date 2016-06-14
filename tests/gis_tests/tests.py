@@ -40,6 +40,8 @@ if HAS_POSTGRES:
                     raise ProgrammingError
                 else:
                     return self.version
+            elif func == 'version':
+                pass
             else:
                 raise NotImplementedError('This function was not expected to be called')
 
@@ -85,8 +87,10 @@ class TestPostgisVersionCheck(unittest.TestCase):
 
         for version in versions:
             ops = FakePostGISOperations(version)
-            self.assertRaises(Exception, lambda: ops.spatial_version)
+            with self.assertRaises(Exception):
+                ops.spatial_version
 
     def test_no_version_number(self):
         ops = FakePostGISOperations()
-        self.assertRaises(ImproperlyConfigured, lambda: ops.spatial_version)
+        with self.assertRaises(ImproperlyConfigured):
+            ops.spatial_version

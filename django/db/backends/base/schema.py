@@ -1,9 +1,10 @@
 import hashlib
 import logging
+from datetime import datetime
 
 from django.db.backends.utils import truncate_name
 from django.db.transaction import atomic
-from django.utils import six
+from django.utils import six, timezone
 from django.utils.encoding import force_bytes
 
 logger = logging.getLogger('django.db.backends.schema')
@@ -58,7 +59,7 @@ class BaseDatabaseSchemaEditor(object):
 
     sql_create_fk = (
         "ALTER TABLE %(table)s ADD CONSTRAINT %(name)s FOREIGN KEY (%(column)s) "
-        "REFERENCES %(to_table)s (%(to_column)s) DEFERRABLE INITIALLY DEFERRED"
+        "REFERENCES %(to_table)s (%(to_column)s)%(deferrable)s"
     )
     sql_create_inline_fk = None
     sql_delete_fk = "ALTER TABLE %(table)s DROP CONSTRAINT %(name)s"
@@ -69,17 +70,18 @@ class BaseDatabaseSchemaEditor(object):
     sql_create_pk = "ALTER TABLE %(table)s ADD CONSTRAINT %(name)s PRIMARY KEY (%(columns)s)"
     sql_delete_pk = "ALTER TABLE %(table)s DROP CONSTRAINT %(name)s"
 
-    def __init__(self, connection, collect_sql=False):
+    def __init__(self, connection, collect_sql=False, atomic=True):
         self.connection = connection
         self.collect_sql = collect_sql
         if self.collect_sql:
             self.collected_sql = []
+        self.atomic_migration = self.connection.features.can_rollback_ddl and atomic
 
     # State-managing methods
 
     def __enter__(self):
         self.deferred_sql = []
-        if self.connection.features.can_rollback_ddl:
+        if self.atomic_migration:
             self.atomic = atomic(self.connection.alias)
             self.atomic.__enter__()
         return self
@@ -88,7 +90,7 @@ class BaseDatabaseSchemaEditor(object):
         if exc_type is None:
             for sql in self.deferred_sql:
                 self.execute(sql)
-        if self.connection.features.can_rollback_ddl:
+        if self.atomic_migration:
             self.atomic.__exit__(exc_type, exc_value, traceback)
 
     # Core utility functions
@@ -98,7 +100,7 @@ class BaseDatabaseSchemaEditor(object):
         Executes the given SQL statement, with optional parameters.
         """
         # Log the command we're running, then run it
-        logger.debug("%s; (params %r)" % (sql, params))
+        logger.debug("%s; (params %r)", sql, params, extra={'params': params, 'sql': sql})
         if self.collect_sql:
             ending = "" if sql.endswith(";") else ";"
             if params is not None:
@@ -200,10 +202,19 @@ class BaseDatabaseSchemaEditor(object):
                 default = six.binary_type()
             else:
                 default = six.text_type()
+        elif getattr(field, 'auto_now', False) or getattr(field, 'auto_now_add', False):
+            default = datetime.now()
+            internal_type = field.get_internal_type()
+            if internal_type == 'DateField':
+                default = default.date
+            elif internal_type == 'TimeField':
+                default = default.time
+            elif internal_type == 'DateTimeField':
+                default = timezone.now
         else:
             default = None
         # If it's a callable, call it
-        if six.callable(default):
+        if callable(default):
             default = default()
         # Run it through the field's get_db_prep_save method so we can send it
         # to the database.
@@ -261,7 +272,7 @@ class BaseDatabaseSchemaEditor(object):
                 definition,
             ))
             # Autoincrement SQL (for backends with post table definition variant)
-            if field.get_internal_type() == "AutoField":
+            if field.get_internal_type() in ("AutoField", "BigAutoField"):
                 autoinc_sql = self.connection.ops.autoinc_sql(model._meta.db_table, field.column)
                 if autoinc_sql:
                     self.deferred_sql.extend(autoinc_sql)
@@ -542,12 +553,7 @@ class BaseDatabaseSchemaEditor(object):
                 self.execute(self._delete_constraint_sql(self.sql_delete_check, model, constraint_name))
         # Have they renamed the column?
         if old_field.column != new_field.column:
-            self.execute(self.sql_rename_column % {
-                "table": self.quote_name(model._meta.db_table),
-                "old_column": self.quote_name(old_field.column),
-                "new_column": self.quote_name(new_field.column),
-                "type": new_type,
-            })
+            self.execute(self._rename_field_sql(model._meta.db_table, old_field, new_field, new_type))
         # Next, start accumulating actions to do
         actions = []
         null_actions = []
@@ -581,6 +587,7 @@ class BaseDatabaseSchemaEditor(object):
                 actions.append((
                     self.sql_alter_column_default % {
                         "column": self.quote_name(new_field.column),
+                        "type": new_type,
                         "default": self.prepare_default(new_default),
                     },
                     [],
@@ -589,6 +596,7 @@ class BaseDatabaseSchemaEditor(object):
                 actions.append((
                     self.sql_alter_column_default % {
                         "column": self.quote_name(new_field.column),
+                        "type": new_type,
                         "default": "%s",
                     },
                     [new_default],
@@ -662,7 +670,9 @@ class BaseDatabaseSchemaEditor(object):
             for sql, params in post_actions:
                 self.execute(sql, params)
         # Added a unique?
-        if not old_field.unique and new_field.unique:
+        if (not old_field.unique and new_field.unique) or (
+            old_field.primary_key and not new_field.primary_key and new_field.unique
+        ):
             self.execute(self._create_unique_sql(model, [new_field.column]))
         # Added an index?
         if (not old_field.db_index and new_field.db_index and
@@ -740,6 +750,7 @@ class BaseDatabaseSchemaEditor(object):
                 "table": self.quote_name(model._meta.db_table),
                 "changes": self.sql_alter_column_no_default % {
                     "column": self.quote_name(new_field.column),
+                    "type": new_type,
                 }
             }
             self.execute(sql)
@@ -864,6 +875,14 @@ class BaseDatabaseSchemaEditor(object):
             output.append(self._create_index_sql(model, fields, suffix="_idx"))
         return output
 
+    def _rename_field_sql(self, table, old_field, new_field, new_type):
+        return self.sql_rename_column % {
+            "table": self.quote_name(table),
+            "old_column": self.quote_name(old_field.column),
+            "new_column": self.quote_name(new_field.column),
+            "type": new_type,
+        }
+
     def _create_fk_sql(self, model, field, suffix):
         from_table = model._meta.db_table
         from_column = field.column
@@ -880,6 +899,7 @@ class BaseDatabaseSchemaEditor(object):
             "column": self.quote_name(from_column),
             "to_table": self.quote_name(to_table),
             "to_column": self.quote_name(to_column),
+            "deferrable": self.connection.ops.deferrable_sql(),
         }
 
     def _create_unique_sql(self, model, columns):

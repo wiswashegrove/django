@@ -13,14 +13,18 @@ from unittest import skipIf
 
 from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.core.urlresolvers import reverse
+from django.db import DatabaseError, connection
 from django.template import TemplateDoesNotExist
 from django.test import RequestFactory, SimpleTestCase, override_settings
 from django.test.utils import LoggingCaptureMixin
+from django.urls import reverse
 from django.utils import six
 from django.utils.encoding import force_bytes, force_text
 from django.utils.functional import SimpleLazyObject
-from django.views.debug import CallableSettingWrapper, ExceptionReporter
+from django.views.debug import (
+    CLEANSED_SUBSTITUTE, CallableSettingWrapper, ExceptionReporter,
+    cleanse_setting, technical_500_response,
+)
 
 from .. import BrokenException, except_args
 from ..views import (
@@ -31,6 +35,11 @@ from ..views import (
 
 if six.PY3:
     from .py3_test_debug import Py3ExceptionReporterTests  # NOQA
+
+
+class User(object):
+    def __str__(self):
+        return 'jacob'
 
 
 class CallableSettingWrapperTests(SimpleTestCase):
@@ -48,7 +57,7 @@ class CallableSettingWrapperTests(SimpleTestCase):
         self.assertEqual(actual, "repr from the wrapped callable")
 
 
-@override_settings(DEBUG=True, ROOT_URLCONF="view_tests.urls")
+@override_settings(DEBUG=True, ROOT_URLCONF='view_tests.urls')
 class DebugViewTests(LoggingCaptureMixin, SimpleTestCase):
 
     def test_files(self):
@@ -116,8 +125,8 @@ class DebugViewTests(LoggingCaptureMixin, SimpleTestCase):
 
     def test_view_exceptions(self):
         for n in range(len(except_args)):
-            self.assertRaises(BrokenException, self.client.get,
-                reverse('view_exception', args=(n,)))
+            with self.assertRaises(BrokenException):
+                self.client.get(reverse('view_exception', args=(n,)))
 
     def test_non_l10ned_numeric_ids(self):
         """
@@ -131,8 +140,10 @@ class DebugViewTests(LoggingCaptureMixin, SimpleTestCase):
             match = re.search(b'<div class="context" id="(?P<id>[^"]+)">', response.content)
             self.assertIsNotNone(match)
             id_repr = match.group('id')
-            self.assertFalse(re.search(b'[^c0-9]', id_repr),
-                             "Numeric IDs in debug response HTML page shouldn't be localized (value: %s)." % id_repr)
+            self.assertFalse(
+                re.search(b'[^c0-9]', id_repr),
+                "Numeric IDs in debug response HTML page shouldn't be localized (value: %s)." % id_repr
+            )
 
     def test_template_exceptions(self):
         for n in range(len(except_args)):
@@ -140,9 +151,11 @@ class DebugViewTests(LoggingCaptureMixin, SimpleTestCase):
                 self.client.get(reverse('template_exception', args=(n,)))
             except Exception:
                 raising_loc = inspect.trace()[-1][-2][0].strip()
-                self.assertNotEqual(raising_loc.find('raise BrokenException'), -1,
-                    "Failed to find 'raise BrokenException' in last frame of traceback, instead found: %s" %
-                        raising_loc)
+                self.assertNotEqual(
+                    raising_loc.find('raise BrokenException'), -1,
+                    "Failed to find 'raise BrokenException' in last frame of "
+                    "traceback, instead found: %s" % raising_loc
+                )
 
     def test_template_loader_postmortem(self):
         """Tests for not existing file"""
@@ -161,14 +174,15 @@ class DebugViewTests(LoggingCaptureMixin, SimpleTestCase):
         """
         Make sure if you don't specify a template, the debug view doesn't blow up.
         """
-        self.assertRaises(TemplateDoesNotExist, self.client.get, '/render_no_template/')
+        with self.assertRaises(TemplateDoesNotExist):
+            self.client.get('/render_no_template/')
 
     @override_settings(ROOT_URLCONF='view_tests.default_urls')
     def test_default_urlconf_template(self):
         """
-        Make sure that the default urlconf template is shown shown instead
+        Make sure that the default URLconf template is shown shown instead
         of the technical 404 page, if the user has not altered their
-        url conf yet.
+        URLconf yet.
         """
         response = self.client.get('/')
         self.assertContains(
@@ -194,9 +208,29 @@ class DebugViewTests(LoggingCaptureMixin, SimpleTestCase):
         )
 
 
+class DebugViewQueriesAllowedTests(SimpleTestCase):
+    # May need a query to initialize MySQL connection
+    allow_database_queries = True
+
+    def test_handle_db_exception(self):
+        """
+        Ensure the debug view works when a database exception is raised by
+        performing an invalid query and passing the exception to the debug view.
+        """
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute('INVALID SQL')
+            except DatabaseError:
+                exc_info = sys.exc_info()
+
+        rf = RequestFactory()
+        response = technical_500_response(rf.get('/'), *exc_info)
+        self.assertContains(response, 'OperationalError at /', status_code=500)
+
+
 @override_settings(
     DEBUG=True,
-    ROOT_URLCONF="view_tests.urls",
+    ROOT_URLCONF='view_tests.urls',
     # No template directories are configured, so no templates will be found.
     TEMPLATES=[{
         'BACKEND': 'django.template.backends.dummy.TemplateStrings',
@@ -231,6 +265,7 @@ class ExceptionReporterTests(SimpleTestCase):
         "A simple exception report can be generated"
         try:
             request = self.rf.get('/test_view/')
+            request.user = User()
             raise ValueError("Can't find my keys")
         except ValueError:
             exc_type, exc_value, tb = sys.exc_info()
@@ -240,6 +275,8 @@ class ExceptionReporterTests(SimpleTestCase):
         self.assertIn('<pre class="exception_value">Can&#39;t find my keys</pre>', html)
         self.assertIn('<th>Request Method:</th>', html)
         self.assertIn('<th>Request URL:</th>', html)
+        self.assertIn('<h3 id="user-info">USER</h3>', html)
+        self.assertIn('<p>jacob</p>', html)
         self.assertIn('<th>Exception Type:</th>', html)
         self.assertIn('<th>Exception Value:</th>', html)
         self.assertIn('<h2>Traceback ', html)
@@ -258,6 +295,7 @@ class ExceptionReporterTests(SimpleTestCase):
         self.assertIn('<pre class="exception_value">Can&#39;t find my keys</pre>', html)
         self.assertNotIn('<th>Request Method:</th>', html)
         self.assertNotIn('<th>Request URL:</th>', html)
+        self.assertNotIn('<h3 id="user-info">USER</h3>', html)
         self.assertIn('<th>Exception Type:</th>', html)
         self.assertIn('<th>Exception Value:</th>', html)
         self.assertIn('<h2>Traceback ', html)
@@ -416,6 +454,14 @@ class ExceptionReporterTests(SimpleTestCase):
             "Evaluation exception reason not mentioned in traceback"
         )
 
+    @override_settings(ALLOWED_HOSTS='example.com')
+    def test_disallowed_host(self):
+        "An exception report can be generated even for a disallowed host."
+        request = self.rf.get('/', HTTP_HOST='evil.com')
+        reporter = ExceptionReporter(request, None, None, None)
+        html = reporter.get_traceback_html()
+        self.assertIn("http://evil.com/", html)
+
 
 class PlainTextReportTests(SimpleTestCase):
     rf = RequestFactory()
@@ -424,6 +470,7 @@ class PlainTextReportTests(SimpleTestCase):
         "A simple exception report can be generated"
         try:
             request = self.rf.get('/test_view/')
+            request.user = User()
             raise ValueError("Can't find my keys")
         except ValueError:
             exc_type, exc_value, tb = sys.exc_info()
@@ -433,6 +480,7 @@ class PlainTextReportTests(SimpleTestCase):
         self.assertIn("Can't find my keys", text)
         self.assertIn('Request Method:', text)
         self.assertIn('Request URL:', text)
+        self.assertIn('USER: jacob', text)
         self.assertIn('Exception Type:', text)
         self.assertIn('Exception Value:', text)
         self.assertIn('Traceback:', text)
@@ -451,6 +499,7 @@ class PlainTextReportTests(SimpleTestCase):
         self.assertIn("Can't find my keys", text)
         self.assertNotIn('Request Method:', text)
         self.assertNotIn('Request URL:', text)
+        self.assertNotIn('USER:', text)
         self.assertIn('Exception Type:', text)
         self.assertIn('Exception Value:', text)
         self.assertIn('Traceback:', text)
@@ -471,6 +520,14 @@ class PlainTextReportTests(SimpleTestCase):
     def test_message_only(self):
         reporter = ExceptionReporter(None, None, "I'm a little teapot", None)
         reporter.get_traceback_text()
+
+    @override_settings(ALLOWED_HOSTS='example.com')
+    def test_disallowed_host(self):
+        "An exception report can be generated even for a disallowed host."
+        request = self.rf.get('/', HTTP_HOST='evil.com')
+        reporter = ExceptionReporter(request, None, None, None)
+        text = reporter.get_traceback_text()
+        self.assertIn("http://evil.com/", text)
 
 
 class ExceptionReportTestMixin(object):
@@ -886,9 +943,22 @@ class AjaxResponseExceptionReporterFilter(ExceptionReportTestMixin, LoggingCaptu
         the request to bypass the one set in DEFAULT_EXCEPTION_REPORTER_FILTER.
         """
         with self.settings(DEBUG=True):
-            self.verify_unsafe_response(custom_exception_reporter_filter_view,
-                check_for_vars=False)
+            self.verify_unsafe_response(custom_exception_reporter_filter_view, check_for_vars=False)
 
         with self.settings(DEBUG=False):
-            self.verify_unsafe_response(custom_exception_reporter_filter_view,
-                check_for_vars=False)
+            self.verify_unsafe_response(custom_exception_reporter_filter_view, check_for_vars=False)
+
+
+class HelperFunctionTests(SimpleTestCase):
+
+    def test_cleanse_setting_basic(self):
+        self.assertEqual(cleanse_setting('TEST', 'TEST'), 'TEST')
+        self.assertEqual(cleanse_setting('PASSWORD', 'super_secret'), CLEANSED_SUBSTITUTE)
+
+    def test_cleanse_setting_ignore_case(self):
+        self.assertEqual(cleanse_setting('password', 'super_secret'), CLEANSED_SUBSTITUTE)
+
+    def test_cleanse_setting_recurses_in_dictionary(self):
+        initial = {'login': 'cooper', 'password': 'secret'}
+        expected = {'login': 'cooper', 'password': CLEANSED_SUBSTITUTE}
+        self.assertEqual(cleanse_setting('SETTING_NAME', initial), expected)

@@ -6,7 +6,7 @@ import warnings
 from django.apps import apps
 from django.template import Origin, TemplateDoesNotExist
 from django.utils import six
-from django.utils.deprecation import RemovedInDjango21Warning
+from django.utils.deprecation import RemovedInDjango20Warning
 
 from .base import Loader as BaseLoader
 
@@ -15,13 +15,15 @@ try:
 except ImportError:
     resource_string = None
 
+warnings.warn('The egg template loader is deprecated.', RemovedInDjango20Warning)
+
 
 class EggOrigin(Origin):
 
     def __init__(self, app_name, pkg_name, *args, **kwargs):
         self.app_name = app_name
         self.pkg_name = pkg_name
-        return super(EggOrigin, self).__init__(*args, **kwargs)
+        super(EggOrigin, self).__init__(*args, **kwargs)
 
 
 class Loader(BaseLoader):
@@ -34,7 +36,7 @@ class Loader(BaseLoader):
     def get_contents(self, origin):
         try:
             source = resource_string(origin.app_name, origin.pkg_name)
-        except:
+        except Exception:
             raise TemplateDoesNotExist(origin)
 
         if six.PY2:
@@ -62,7 +64,7 @@ class Loader(BaseLoader):
         warnings.warn(
             'The load_template_sources() method is deprecated. Use '
             'get_template() or get_contents() instead.',
-            RemovedInDjango21Warning,
+            RemovedInDjango20Warning,
         )
         for origin in self.get_template_sources(template_name):
             try:

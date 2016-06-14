@@ -12,7 +12,8 @@ from django.template import Context, TemplateDoesNotExist
 from django.template.engine import Engine
 from django.test import SimpleTestCase, ignore_warnings, override_settings
 from django.utils import six
-from django.utils.deprecation import RemovedInDjango21Warning
+from django.utils.deprecation import RemovedInDjango20Warning
+from django.utils.functional import lazystr
 
 from .utils import TEMPLATE_DIR
 
@@ -49,13 +50,48 @@ class CachedLoaderTests(SimpleTestCase):
         self.assertEqual(template.origin.template_name, 'index.html')
         self.assertEqual(template.origin.loader, self.engine.template_loaders[0].loaders[0])
 
-    def test_get_template_missing(self):
+    def test_get_template_missing_debug_off(self):
+        """
+        With template debugging disabled, the raw TemplateDoesNotExist class
+        should be cached when a template is missing. See ticket #26306 and
+        docstrings in the cached loader for details.
+        """
+        self.engine.debug = False
         with self.assertRaises(TemplateDoesNotExist):
-            self.engine.get_template('doesnotexist.html')
-        e = self.engine.template_loaders[0].get_template_cache['doesnotexist.html']
-        self.assertEqual(e.args[0], 'doesnotexist.html')
+            self.engine.get_template('prod-template-missing.html')
+        e = self.engine.template_loaders[0].get_template_cache['prod-template-missing.html']
+        self.assertEqual(e, TemplateDoesNotExist)
 
-    @ignore_warnings(category=RemovedInDjango21Warning)
+    def test_get_template_missing_debug_on(self):
+        """
+        With template debugging enabled, a TemplateDoesNotExist instance
+        should be cached when a template is missing.
+        """
+        self.engine.debug = True
+        with self.assertRaises(TemplateDoesNotExist):
+            self.engine.get_template('debug-template-missing.html')
+        e = self.engine.template_loaders[0].get_template_cache['debug-template-missing.html']
+        self.assertIsInstance(e, TemplateDoesNotExist)
+        self.assertEqual(e.args[0], 'debug-template-missing.html')
+
+    @unittest.skipIf(six.PY2, "Python 2 doesn't set extra exception attributes")
+    def test_cached_exception_no_traceback(self):
+        """
+        When a TemplateDoesNotExist instance is cached, the cached instance
+        should not contain the __traceback__, __context__, or __cause__
+        attributes that Python sets when raising exceptions.
+        """
+        self.engine.debug = True
+        with self.assertRaises(TemplateDoesNotExist):
+            self.engine.get_template('no-traceback-in-cache.html')
+        e = self.engine.template_loaders[0].get_template_cache['no-traceback-in-cache.html']
+
+        error_msg = "Cached TemplateDoesNotExist must not have been thrown."
+        self.assertIsNone(e.__traceback__, error_msg)
+        self.assertIsNone(e.__context__, error_msg)
+        self.assertIsNone(e.__cause__, error_msg)
+
+    @ignore_warnings(category=RemovedInDjango20Warning)
     def test_load_template(self):
         loader = self.engine.template_loaders[0]
         template, origin = loader.load_template('index.html')
@@ -69,7 +105,7 @@ class CachedLoaderTests(SimpleTestCase):
         source, name = loader.load_template('index.html')
         self.assertEqual(template.origin.template_name, 'index.html')
 
-    @ignore_warnings(category=RemovedInDjango21Warning)
+    @ignore_warnings(category=RemovedInDjango20Warning)
     def test_load_template_missing(self):
         """
         #19949 -- TemplateDoesNotExist exceptions should be cached.
@@ -87,6 +123,18 @@ class CachedLoaderTests(SimpleTestCase):
             "Cached loader failed to cache the TemplateDoesNotExist exception",
         )
 
+    @ignore_warnings(category=RemovedInDjango20Warning)
+    def test_load_nonexistent_cached_template(self):
+        loader = self.engine.template_loaders[0]
+        template_name = 'nonexistent.html'
+
+        # fill the template cache
+        with self.assertRaises(TemplateDoesNotExist):
+            loader.find_template(template_name)
+
+        with self.assertRaisesMessage(TemplateDoesNotExist, template_name):
+            loader.get_template(template_name)
+
     def test_templatedir_caching(self):
         """
         #13573 -- Template directories should be part of the cache key.
@@ -98,6 +146,20 @@ class CachedLoaderTests(SimpleTestCase):
 
         # The two templates should not have the same content
         self.assertNotEqual(t1.render(Context({})), t2.render(Context({})))
+
+    def test_template_name_leading_dash_caching(self):
+        """
+        #26536 -- A leading dash in a template name shouldn't be stripped
+        from its cache key.
+        """
+        self.assertEqual(self.engine.template_loaders[0].cache_key('-template.html', []), '-template.html')
+
+    def test_template_name_lazy_string(self):
+        """
+        #26603 -- A template name specified as a lazy string should be forced
+        to text before computing its cache key.
+        """
+        self.assertEqual(self.engine.template_loaders[0].cache_key(lazystr('template.html'), []), 'template.html')
 
 
 @unittest.skipUnless(pkg_resources, 'setuptools is not installed')
@@ -153,6 +215,7 @@ class EggLoaderTests(SimpleTestCase):
             del pkg_resources._provider_factories[MockLoader]
 
     @classmethod
+    @ignore_warnings(category=RemovedInDjango20Warning)
     def setUpClass(cls):
         cls.engine = Engine(loaders=[
             'django.template.loaders.eggs.Loader',
@@ -176,7 +239,7 @@ class EggLoaderTests(SimpleTestCase):
         output = template.render(Context({}))
         self.assertEqual(output, "y")
 
-    @ignore_warnings(category=RemovedInDjango21Warning)
+    @ignore_warnings(category=RemovedInDjango20Warning)
     def test_load_template_source(self):
         loader = self.engine.template_loaders[0]
         templates = {
@@ -249,7 +312,7 @@ class FileSystemLoaderTests(SimpleTestCase):
         self.assertEqual(template.origin.loader, self.engine.template_loaders[0])
         self.assertEqual(template.origin.loader_name, 'django.template.loaders.filesystem.Loader')
 
-    @ignore_warnings(category=RemovedInDjango21Warning)
+    @ignore_warnings(category=RemovedInDjango20Warning)
     def test_load_template_source(self):
         loader = self.engine.template_loaders[0]
         source, name = loader.load_template_source('index.html')
@@ -336,7 +399,7 @@ class AppDirectoriesLoaderTests(SimpleTestCase):
         self.assertEqual(template.origin.template_name, 'index.html')
         self.assertEqual(template.origin.loader, self.engine.template_loaders[0])
 
-    @ignore_warnings(category=RemovedInDjango21Warning)
+    @ignore_warnings(category=RemovedInDjango20Warning)
     @override_settings(INSTALLED_APPS=['template_tests'])
     def test_load_template_source(self):
         loader = self.engine.template_loaders[0]
@@ -367,7 +430,7 @@ class LocmemLoaderTests(SimpleTestCase):
         self.assertEqual(template.origin.template_name, 'index.html')
         self.assertEqual(template.origin.loader, self.engine.template_loaders[0])
 
-    @ignore_warnings(category=RemovedInDjango21Warning)
+    @ignore_warnings(category=RemovedInDjango20Warning)
     def test_load_template_source(self):
         loader = self.engine.template_loaders[0]
         source, name = loader.load_template_source('index.html')

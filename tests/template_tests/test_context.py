@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
+import warnings
 
 from django.http import HttpRequest
 from django.template import (
-    Context, Engine, RequestContext, Variable, VariableDoesNotExist,
+    Context, Engine, RequestContext, Template, Variable, VariableDoesNotExist,
 )
 from django.template.context import RenderContext
-from django.test import RequestFactory, SimpleTestCase
+from django.test import RequestFactory, SimpleTestCase, ignore_warnings
+from django.utils.deprecation import RemovedInDjango20Warning
 
 
 class ContextTests(SimpleTestCase):
@@ -42,6 +44,46 @@ class ContextTests(SimpleTestCase):
         with c.update({'a': 3}):
             self.assertEqual(c['a'], 3)
         self.assertEqual(c['a'], 1)
+
+    def test_push_context_manager_with_context_object(self):
+        c = Context({'a': 1})
+        with c.push(Context({'a': 3})):
+            self.assertEqual(c['a'], 3)
+        self.assertEqual(c['a'], 1)
+
+    def test_update_context_manager_with_context_object(self):
+        c = Context({'a': 1})
+        with c.update(Context({'a': 3})):
+            self.assertEqual(c['a'], 3)
+        self.assertEqual(c['a'], 1)
+
+    def test_push_proper_layering(self):
+        c = Context({'a': 1})
+        c.push(Context({'b': 2}))
+        c.push(Context({'c': 3, 'd': {'z': '26'}}))
+        self.assertEqual(
+            c.dicts,
+            [
+                {'False': False, 'None': None, 'True': True},
+                {'a': 1},
+                {'b': 2},
+                {'c': 3, 'd': {'z': '26'}},
+            ]
+        )
+
+    def test_update_proper_layering(self):
+        c = Context({'a': 1})
+        c.update(Context({'b': 2}))
+        c.update(Context({'c': 3, 'd': {'z': '26'}}))
+        self.assertEqual(
+            c.dicts,
+            [
+                {'False': False, 'None': None, 'True': True},
+                {'a': 1},
+                {'b': 2},
+                {'c': 3, 'd': {'z': '26'}},
+            ]
+        )
 
     def test_setdefault(self):
         c = Context()
@@ -96,6 +138,20 @@ class ContextTests(SimpleTestCase):
             'a': 2, 'b': 4, 'c': 8
         })
 
+    def test_flatten_context_with_context(self):
+        """
+        Context.push() with a Context argument should work.
+        """
+        a = Context({'a': 2})
+        a.push(Context({'z': '8'}))
+        self.assertEqual(a.flatten(), {
+            'False': False,
+            'None': None,
+            'True': True,
+            'a': 2,
+            'z': '8',
+        })
+
     def test_context_comparable(self):
         """
         #21765 -- equality comparison should work
@@ -128,6 +184,26 @@ class ContextTests(SimpleTestCase):
         """
         RequestContext(HttpRequest()).new().new()
 
+    @ignore_warnings(category=RemovedInDjango20Warning)
+    def test_has_key(self):
+        a = Context({'a': 1})
+        b = RequestContext(HttpRequest(), {'a': 1})
+        msg = "Context.has_key() is deprecated in favor of the 'in' operator."
+        msg2 = "RequestContext.has_key() is deprecated in favor of the 'in' operator."
+
+        with warnings.catch_warnings(record=True) as warns:
+            warnings.simplefilter('always')
+            self.assertEqual(a.has_key('a'), True)
+            self.assertEqual(a.has_key('b'), False)
+            self.assertEqual(b.has_key('a'), True)
+            self.assertEqual(b.has_key('b'), False)
+
+        self.assertEqual(len(warns), 4)
+        self.assertEqual(str(warns[0].message), msg)
+        self.assertEqual(str(warns[1].message), msg)
+        self.assertEqual(str(warns[2].message), msg2)
+        self.assertEqual(str(warns[3].message), msg2)
+
 
 class RequestContextTests(SimpleTestCase):
 
@@ -153,8 +229,8 @@ class RequestContextTests(SimpleTestCase):
         request = RequestFactory().get('/')
         ctx = RequestContext(request, {})
         # The stack should now contain 3 items:
-        # [builtins, supplied context, context processor]
-        self.assertEqual(len(ctx.dicts), 3)
+        # [builtins, supplied context, context processor, empty dict]
+        self.assertEqual(len(ctx.dicts), 4)
 
     def test_context_comparable(self):
         # Create an engine without any context processors.
@@ -168,3 +244,10 @@ class RequestContextTests(SimpleTestCase):
             RequestContext(request, dict_=test_data),
             RequestContext(request, dict_=test_data),
         )
+
+    def test_modify_context_and_render(self):
+        template = Template('{{ foo }}')
+        request = RequestFactory().get('/')
+        context = RequestContext(request, {})
+        context['foo'] = 'foo'
+        self.assertEqual(template.render(context), 'foo')

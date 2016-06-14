@@ -9,6 +9,7 @@ from django.utils.encoding import (
     escape_uri_path, filepath_to_uri, force_bytes, force_text, iri_to_uri,
     smart_text, uri_to_iri,
 )
+from django.utils.functional import SimpleLazyObject
 from django.utils.http import urlquote_plus
 
 
@@ -26,7 +27,12 @@ class TestEncodingUtils(unittest.TestCase):
         # str(s) raises a TypeError on python 3 if the result is not a text type.
         # python 2 fails when it tries converting from str to unicode (via ASCII).
         exception = TypeError if six.PY3 else UnicodeError
-        self.assertRaises(exception, force_text, MyString())
+        with self.assertRaises(exception):
+            force_text(MyString())
+
+    def test_force_text_lazy(self):
+        s = SimpleLazyObject(lambda: 'x')
+        self.assertTrue(issubclass(type(force_text(s)), six.text_type))
 
     def test_force_bytes_exception(self):
         """
@@ -74,10 +80,11 @@ class TestEncodingUtils(unittest.TestCase):
 class TestRFC3987IEncodingUtils(unittest.TestCase):
 
     def test_filepath_to_uri(self):
-        self.assertEqual(filepath_to_uri('upload\\чубака.mp4'),
-            'upload/%D1%87%D1%83%D0%B1%D0%B0%D0%BA%D0%B0.mp4')
-        self.assertEqual(filepath_to_uri('upload\\чубака.mp4'.encode('utf-8')),
-            'upload/%D1%87%D1%83%D0%B1%D0%B0%D0%BA%D0%B0.mp4')
+        self.assertEqual(filepath_to_uri('upload\\чубака.mp4'), 'upload/%D1%87%D1%83%D0%B1%D0%B0%D0%BA%D0%B0.mp4')
+        self.assertEqual(
+            filepath_to_uri('upload\\чубака.mp4'.encode('utf-8')),
+            'upload/%D1%87%D1%83%D0%B1%D0%B0%D0%BA%D0%B0.mp4'
+        )
 
     def test_iri_to_uri(self):
         cases = [

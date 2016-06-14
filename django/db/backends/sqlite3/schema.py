@@ -36,10 +36,12 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
         # The backend "mostly works" without this function and there are use
         # cases for compiling Python without the sqlite3 libraries (e.g.
         # security hardening).
-        import _sqlite3
         try:
-            value = _sqlite3.adapt(value)
-        except _sqlite3.ProgrammingError:
+            import sqlite3
+            value = sqlite3.adapt(value)
+        except ImportError:
+            pass
+        except sqlite3.ProgrammingError:
             pass
         # Manual emulation of SQLite parameter quoting
         if isinstance(value, type(True)):
@@ -76,11 +78,19 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
           3. copy the data from the old renamed table to the new table
           4. delete the "app_model__old" table
         """
+        # Self-referential fields must be recreated rather than copied from
+        # the old model to ensure their remote_field.field_name doesn't refer
+        # to an altered field.
+        def is_self_referential(f):
+            return f.is_relation and f.remote_field.model is model
         # Work out the new fields dict / mapping
-        body = {f.name: f for f in model._meta.local_fields}
+        body = {
+            f.name: f.clone() if is_self_referential(f) else f
+            for f in model._meta.local_concrete_fields
+        }
         # Since mapping might mix column names and default values,
         # its values must be already quoted.
-        mapping = {f.column: self.quote_name(f.column) for f in model._meta.local_fields}
+        mapping = {f.column: self.quote_name(f.column) for f in model._meta.local_concrete_fields}
         # This maps field names (not columns) for things like unique_together
         rename_mapping = {}
         # If any of the new or altered fields is introducing a new PK,
@@ -98,7 +108,7 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
         for field in create_fields:
             body[field.name] = field
             # Choose a default and insert it into the copy map
-            if not field.many_to_many:
+            if not field.many_to_many and field.concrete:
                 mapping[field.column] = self.quote_value(
                     self.effective_default(field)
                 )

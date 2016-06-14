@@ -4,6 +4,7 @@ from __future__ import unicode_literals
 from django.db import migrations, models
 
 from ..fields import *  # NOQA
+from ..models import TagField
 
 
 class Migration(migrations.Migration):
@@ -55,6 +56,7 @@ class Migration(migrations.Migration):
                 ('ips', ArrayField(models.GenericIPAddressField(), size=None)),
                 ('uuids', ArrayField(models.UUIDField(), size=None)),
                 ('decimals', ArrayField(models.DecimalField(max_digits=5, decimal_places=2), size=None)),
+                ('tags', ArrayField(TagField(), blank=True, null=True, size=None)),
             ],
             options={
                 'required_db_vendor': 'postgresql',
@@ -113,6 +115,40 @@ class Migration(migrations.Migration):
             bases=None,
         ),
         migrations.CreateModel(
+            name='Scene',
+            fields=[
+                ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
+                ('scene', models.CharField(max_length=255)),
+                ('setting', models.CharField(max_length=255)),
+            ],
+            options=None,
+            bases=None,
+        ),
+        migrations.CreateModel(
+            name='Character',
+            fields=[
+                ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
+                ('name', models.CharField(max_length=255)),
+            ],
+            options=None,
+            bases=None,
+        ),
+        migrations.CreateModel(
+            name='Line',
+            fields=[
+                ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
+                ('scene', models.ForeignKey('postgres_tests.Scene', on_delete=models.SET_NULL)),
+                ('character', models.ForeignKey('postgres_tests.Character', on_delete=models.SET_NULL)),
+                ('dialogue', models.TextField(blank=True, null=True)),
+                ('dialogue_search_vector', SearchVectorField(blank=True, null=True)),
+                ('dialogue_config', models.CharField(max_length=100, blank=True, null=True)),
+            ],
+            options={
+                'required_db_vendor': 'postgresql',
+            },
+            bases=None,
+        ),
+        migrations.CreateModel(
             name='AggregateTestModel',
             fields=[
                 ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
@@ -127,12 +163,20 @@ class Migration(migrations.Migration):
                 ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
                 ('int1', models.IntegerField()),
                 ('int2', models.IntegerField()),
-                ('related_field', models.ForeignKey('postgres_tests.AggregateTestModel', null=True)),
+                ('related_field', models.ForeignKey(
+                    'postgres_tests.AggregateTestModel',
+                    models.SET_NULL,
+                    null=True,
+                )),
             ]
         ),
-    ]
-
-    pg_92_operations = [
+        migrations.CreateModel(
+            name='NowTestModel',
+            fields=[
+                ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
+                ('when', models.DateTimeField(null=True, default=None)),
+            ]
+        ),
         migrations.CreateModel(
             name='RangesModel',
             fields=[
@@ -144,7 +188,39 @@ class Migration(migrations.Migration):
                 ('dates', DateRangeField(null=True, blank=True)),
             ],
             options={
+                'required_db_vendor': 'postgresql'
+            },
+            bases=(models.Model,)
+        ),
+        migrations.CreateModel(
+            name='RangeLookupsModel',
+            fields=[
+                ('parent', models.ForeignKey(
+                    'postgres_tests.RangesModel',
+                    models.SET_NULL,
+                    blank=True, null=True,
+                )),
+                ('integer', models.IntegerField(blank=True, null=True)),
+                ('big_integer', models.BigIntegerField(blank=True, null=True)),
+                ('float', models.FloatField(blank=True, null=True)),
+                ('timestamp', models.DateTimeField(blank=True, null=True)),
+                ('date', models.DateField(blank=True, null=True)),
+            ],
+            options={
                 'required_db_vendor': 'postgresql',
+            },
+            bases=(models.Model,),
+        ),
+    ]
+
+    pg_94_operations = [
+        migrations.CreateModel(
+            name='JSONModel',
+            fields=[
+                ('id', models.AutoField(verbose_name='ID', serialize=False, auto_created=True, primary_key=True)),
+                ('field', JSONField(null=True, blank=True)),
+            ],
+            options={
             },
             bases=(models.Model,),
         ),
@@ -156,6 +232,6 @@ class Migration(migrations.Migration):
         except AttributeError:
             pass  # We are probably not on PostgreSQL
         else:
-            if PG_VERSION >= 90200:
-                self.operations = self.operations + self.pg_92_operations
+            if PG_VERSION >= 90400:
+                self.operations = self.operations + self.pg_94_operations
         return super(Migration, self).apply(project_state, schema_editor, collect_sql)

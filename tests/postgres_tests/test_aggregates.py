@@ -6,11 +6,11 @@ from django.contrib.postgres.aggregates import (
 from django.db.models.expressions import F, Value
 from django.test.utils import Approximate
 
-from . import PostgresSQLTestCase
+from . import PostgreSQLTestCase
 from .models import AggregateTestModel, StatTestModel
 
 
-class TestGeneralAggregate(PostgresSQLTestCase):
+class TestGeneralAggregate(PostgreSQLTestCase):
     @classmethod
     def setUpTestData(cls):
         AggregateTestModel.objects.create(boolean_field=True, char_field='Foo1', integer_field=0)
@@ -111,7 +111,25 @@ class TestGeneralAggregate(PostgresSQLTestCase):
         self.assertEqual(values, {'stringagg': ''})
 
 
-class TestStatisticsAggregate(PostgresSQLTestCase):
+class TestStringAggregateDistinct(PostgreSQLTestCase):
+    @classmethod
+    def setUpTestData(cls):
+        AggregateTestModel.objects.create(char_field='Foo')
+        AggregateTestModel.objects.create(char_field='Foo')
+        AggregateTestModel.objects.create(char_field='Bar')
+
+    def test_string_agg_distinct_false(self):
+        values = AggregateTestModel.objects.aggregate(stringagg=StringAgg('char_field', delimiter=' ', distinct=False))
+        self.assertEqual(values['stringagg'].count('Foo'), 2)
+        self.assertEqual(values['stringagg'].count('Bar'), 1)
+
+    def test_string_agg_distinct_true(self):
+        values = AggregateTestModel.objects.aggregate(stringagg=StringAgg('char_field', delimiter=' ', distinct=True))
+        self.assertEqual(values['stringagg'].count('Foo'), 1)
+        self.assertEqual(values['stringagg'].count('Bar'), 1)
+
+
+class TestStatisticsAggregate(PostgreSQLTestCase):
     @classmethod
     def setUpTestData(cls):
         StatTestModel.objects.create(
